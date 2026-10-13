@@ -91,6 +91,91 @@ class DashboardController extends Controller
             ])
             ->values();
 
+        // 1. Gráfico de asistencia semanal real (Lunes a Sábado de la semana actual)
+        $asistenciaSemanal = [];
+        $diasLabels = [
+            1 => 'Lun',
+            2 => 'Mar',
+            3 => 'Mié',
+            4 => 'Jue',
+            5 => 'Vie',
+            6 => 'Sáb',
+        ];
+
+        $countsPorDia = [];
+        if (Schema::hasTable('asistencias')) {
+            $lunes = now()->startOfWeek()->toDateString();
+            $domingo = now()->endOfWeek()->toDateString();
+
+            $countsPorDia = Asistencia::query()
+                ->whereBetween('fecha', [$lunes, $domingo])
+                ->selectRaw('DATE(fecha) as dia_fecha, COUNT(*) as total')
+                ->groupBy('dia_fecha')
+                ->pluck('total', 'dia_fecha')
+                ->toArray();
+        }
+
+        $maxVisitas = !empty($countsPorDia) ? max(array_values($countsPorDia)) : 0;
+        if ($maxVisitas <= 0) {
+            $maxVisitas = 1;
+        }
+
+        for ($i = 1; $i <= 6; $i++) {
+            $fechaDia = now()->startOfWeek()->addDays($i - 1)->toDateString();
+            $visitas = (int) ($countsPorDia[$fechaDia] ?? 0);
+            $porcentaje = !empty($countsPorDia) && $maxVisitas > 0
+                ? (int) round(($visitas / $maxVisitas) * 100)
+                : 0;
+
+            $asistenciaSemanal[] = [
+                'day' => $diasLabels[$i],
+                'visits' => $visitas,
+                'percentage' => min(100, $porcentaje),
+            ];
+        }
+
+        // 2. Clases más populares reales (Top 5 por histórico de reservas)
+        $clasesPopulares = [];
+        if (Schema::hasTable('reservas') && Schema::hasTable('grupos')) {
+            $topGrupos = Reserva::query()
+                ->whereNotNull('grupo_id')
+                ->where('estado', '!=', 'cancelada')
+                ->selectRaw('grupo_id, COUNT(*) as total_reservas')
+                ->groupBy('grupo_id')
+                ->orderByDesc('total_reservas')
+                ->limit(5)
+                ->with('grupo:id,nombre')
+                ->get();
+
+            $clasesPopulares = $topGrupos->map(function ($row) {
+                return [
+                    'name' => $row->grupo?->nombre ?? 'Clase #' . $row->grupo_id,
+                    'reservations' => (int) $row->total_reservas,
+                    'trend' => 'Top',
+                ];
+            })->values()->toArray();
+        }
+
+        // 3. Porcentaje de ocupación hoy (reservas de hoy vs cupos de turnos de hoy)
+        $porcentajeOcupacion = 0;
+        if (Schema::hasTable('turnos') && Schema::hasTable('reservas')) {
+            $turnosHoy = Turno::query()
+                ->where('activo', true)
+                ->where('dia_semana', now()->dayOfWeek)
+                ->get();
+
+            $cupoTotalHoy = $turnosHoy->sum(fn (Turno $t) => $t->cupo_efectivo);
+
+            if ($cupoTotalHoy > 0) {
+                $reservasHoy = Reserva::query()
+                    ->whereDate('fecha', $hoy)
+                    ->where('estado', '!=', 'cancelada')
+                    ->count();
+
+                $porcentajeOcupacion = min(100, (int) round(($reservasHoy / $cupoTotalHoy) * 100));
+            }
+        }
+
         return response()->json([
             'metrics' => [
                 'sociosActivos' => $sociosActivos,
@@ -101,15 +186,8 @@ class DashboardController extends Controller
                 'balanceHoy' => $balanceHoy,
             ],
             'charts' => [
-                'asistenciaSemanal' => [
-                    ['day' => 'Lun', 'visits' => 0, 'percentage' => 0],
-                    ['day' => 'Mar', 'visits' => 0, 'percentage' => 0],
-                    ['day' => 'Mié', 'visits' => 0, 'percentage' => 0],
-                    ['day' => 'Jue', 'visits' => 0, 'percentage' => 0],
-                    ['day' => 'Vie', 'visits' => 0, 'percentage' => 0],
-                    ['day' => 'Sáb', 'visits' => 0, 'percentage' => 0],
-                ],
-                'clasesPopulares' => [],
+                'asistenciaSemanal' => $asistenciaSemanal,
+                'clasesPopulares' => $clasesPopulares,
             ],
             'membershipOverview' => [
                 'activas' => $activas,
@@ -118,7 +196,7 @@ class DashboardController extends Controller
                 'vencidas' => $vencidas,
             ],
             'ocupacion' => [
-                'porcentaje' => 0,
+                'porcentaje' => $porcentajeOcupacion,
             ],
             'instructores' => $instructores,
         ]);
