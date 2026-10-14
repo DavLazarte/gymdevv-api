@@ -98,17 +98,19 @@ class AlumnoService
                 'activo' => true,
             ]);
 
+            $rawDni = $data['dni'] ?? $data['num_documento'] ?? null;
+            $rawFechaNac = $data['fechaNacimiento'] ?? $data['fecha_nacimiento'] ?? null;
+            $rawNotas = $data['notas'] ?? $data['observaciones'] ?? null;
+
             $alumno = Alumno::create([
                 'tenant_id' => $tenantId,
                 'usuario_id' => $usuario->id,
-                'dni' => $data['dni'] ?? $data['num_documento'] ?? null,
-                'direccion' => $data['direccion'] ?? null,
-                'fecha_nacimiento' => ! empty($data['fechaNacimiento'] ?? $data['fecha_nacimiento'] ?? null)
-                    ? ($data['fechaNacimiento'] ?? $data['fecha_nacimiento'])
-                    : null,
+                'dni' => $rawDni !== null && trim((string) $rawDni) !== '' ? trim((string) $rawDni) : null,
+                'direccion' => ! empty($data['direccion']) ? trim((string) $data['direccion']) : null,
+                'fecha_nacimiento' => $rawFechaNac !== null && trim((string) $rawFechaNac) !== '' ? trim((string) $rawFechaNac) : null,
                 'fecha_alta' => ! empty($data['fecha_alta']) ? $data['fecha_alta'] : now()->toDateString(),
                 'estado' => $data['estado'] ?? EstadoAlumno::Activo->value,
-                'notas' => $data['notas'] ?? $data['observaciones'] ?? null,
+                'notas' => $rawNotas !== null && trim((string) $rawNotas) !== '' ? trim((string) $rawNotas) : null,
             ]);
 
             return $alumno->load('usuario');
@@ -132,12 +134,15 @@ class AlumnoService
                 $usuario->avatar_url
             );
 
+            $telefonoPresent = array_key_exists('telefono', $data);
+            $direccionPresent = array_key_exists('direccion', $data);
+
             $usuarioData = [
                 'nombre' => $nombre,
                 'apellido' => $apellido,
                 'email' => $email,
-                'telefono' => $data['telefono'] ?? $usuario->telefono,
-                'direccion' => $data['direccion'] ?? $usuario->direccion,
+                'telefono' => $telefonoPresent ? (trim((string) ($data['telefono'] ?? '')) ?: null) : $usuario->telefono,
+                'direccion' => $direccionPresent ? (trim((string) ($data['direccion'] ?? '')) ?: null) : $usuario->direccion,
                 'avatar_url' => $avatarUrl,
             ];
 
@@ -151,14 +156,26 @@ class AlumnoService
 
             $usuario->update($usuarioData);
 
+            $dniPresent = array_key_exists('dni', $data) || array_key_exists('num_documento', $data);
+            $rawDni = $data['dni'] ?? $data['num_documento'] ?? null;
+            $finalDni = $dniPresent ? (trim((string) ($rawDni ?? '')) ?: null) : $alumno->dni;
+
+            $finalAlumnoDireccion = $direccionPresent ? (trim((string) ($data['direccion'] ?? '')) ?: null) : $alumno->direccion;
+
+            $fechaNacPresent = array_key_exists('fechaNacimiento', $data) || array_key_exists('fecha_nacimiento', $data);
+            $rawFechaNac = $data['fechaNacimiento'] ?? $data['fecha_nacimiento'] ?? null;
+            $finalFechaNac = $fechaNacPresent ? (trim((string) ($rawFechaNac ?? '')) ?: null) : $alumno->fecha_nacimiento;
+
+            $notasPresent = array_key_exists('notas', $data) || array_key_exists('observaciones', $data);
+            $rawNotas = $data['notas'] ?? $data['observaciones'] ?? null;
+            $finalNotas = $notasPresent ? (trim((string) ($rawNotas ?? '')) ?: null) : $alumno->notas;
+
             $alumno->update([
-                'dni' => $data['dni'] ?? $data['num_documento'] ?? $alumno->dni,
-                'direccion' => $data['direccion'] ?? $alumno->direccion,
-                'fecha_nacimiento' => array_key_exists('fechaNacimiento', $data) || array_key_exists('fecha_nacimiento', $data)
-                    ? (($data['fechaNacimiento'] ?? $data['fecha_nacimiento']) ?: null)
-                    : $alumno->fecha_nacimiento,
+                'dni' => $finalDni,
+                'direccion' => $finalAlumnoDireccion,
+                'fecha_nacimiento' => $finalFechaNac,
                 'estado' => $data['estado'] ?? $alumno->estado_value,
-                'notas' => $data['notas'] ?? $data['observaciones'] ?? $alumno->notas,
+                'notas' => $finalNotas,
             ]);
 
             return $alumno->refresh()->load('usuario');
@@ -231,14 +248,19 @@ class AlumnoService
             $instructor->avatar_url
         );
 
+        $telefonoPresent = array_key_exists('telefono', $data);
+        $direccionPresent = array_key_exists('direccion', $data);
+        $bioPresent = array_key_exists('biografia', $data) || array_key_exists('observaciones', $data);
+        $rawBio = $data['biografia'] ?? $data['observaciones'] ?? null;
+
         $updateData = [
             'nombre' => $nombre,
             'apellido' => $apellido,
             'email' => $email,
-            'telefono' => $data['telefono'] ?? $instructor->telefono,
-            'direccion' => $data['direccion'] ?? $instructor->direccion,
+            'telefono' => $telefonoPresent ? (trim((string) ($data['telefono'] ?? '')) ?: null) : $instructor->telefono,
+            'direccion' => $direccionPresent ? (trim((string) ($data['direccion'] ?? '')) ?: null) : $instructor->direccion,
             'especialidades' => $especialidades,
-            'biografia' => $data['biografia'] ?? $data['observaciones'] ?? $instructor->biografia,
+            'biografia' => $bioPresent ? (trim((string) ($rawBio ?? '')) ?: null) : $instructor->biografia,
             'avatar_url' => $avatarUrl,
             'activo' => isset($data['estado']) ? ($data['estado'] === 'activo') : $instructor->activo,
         ];
