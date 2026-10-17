@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ClaseGrupoController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\EntrenamientoController;
+use App\Http\Controllers\Api\LeadController;
 use App\Http\Controllers\Api\MembresiaController;
 use App\Http\Controllers\Api\PagoController;
 use App\Http\Controllers\Api\ReservaController;
@@ -61,6 +62,10 @@ Route::middleware(['tenant'])->group(function () {
         Route::apiResource('socios', AlumnoController::class)->parameters(['socios' => 'id']);
         Route::apiResource('alumnos', AlumnoController::class)->parameters(['alumnos' => 'id']);
         Route::apiResource('usuarios', UsuarioController::class);
+
+        // Pre-venta, Leads y Lista de Espera (Turnos Fijos)
+        Route::post('/leads/{id}/convertir', [LeadController::class, 'convertir']);
+        Route::apiResource('leads', LeadController::class)->parameters(['leads' => 'id']);
 
         // Módulo 3: Tipos de Membresía (Planes comerciales), Membresías, Pagos y Salidas de Caja
         Route::apiResource('servicios', TipoMembresiaController::class)->parameters(['servicios' => 'id']);

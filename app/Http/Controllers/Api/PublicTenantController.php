@@ -47,14 +47,62 @@ class PublicTenantController extends Controller
             ->orderBy('precio')
             ->get();
 
-        // Clases / Disciplinas activas del Box
-        $clases = Grupo::withoutGlobalScopes()
+        $hasLeadsTable = \Illuminate\Support\Facades\Schema::hasTable('leads');
+
+        // Clases / Disciplinas activas del Box con cálculo de cupos de turnos fijos
+        $gruposQuery = Grupo::withoutGlobalScopes()
             ->where('tenant_id', $tenant->id)
             ->where('activo', true)
-            ->whereNull('deleted_at')
-            ->select('id', 'nombre', 'descripcion', 'modalidad', 'hora_inicio', 'hora_fin', 'dias_semana', 'cupo_default')
-            ->orderBy('nombre')
-            ->get();
+            ->whereNull('deleted_at');
+
+        if (\Illuminate\Support\Facades\Schema::hasTable('inscripciones_turno')) {
+            $gruposQuery->with(['turnos.inscripciones' => function ($q) {
+                $q->where('estado', 'activa')->whereNull('fecha_baja');
+            }]);
+        }
+
+        $clases = $gruposQuery->orderBy('hora_inicio')->get()->map(function (Grupo $grupo) use ($tenant, $hasLeadsTable) {
+            $inscriptosFijosIds = [];
+            if ($grupo->relationLoaded('turnos')) {
+                foreach ($grupo->turnos as $turno) {
+                    if ($turno->relationLoaded('inscripciones')) {
+                        foreach ($turno->inscripciones as $insc) {
+                            $inscriptosFijosIds[$insc->alumno_id] = true;
+                        }
+                    }
+                }
+            }
+            $inscriptosFijos = count($inscriptosFijosIds);
+
+            // Leads pendientes / contactados que descuentan cupo virtual en preventa
+            $leadsPendientes = 0;
+            if ($hasLeadsTable) {
+                $leadsPendientes = \App\Models\Lead::withoutGlobalScopes()
+                    ->where('tenant_id', $tenant->id)
+                    ->where('grupo_id', $grupo->id)
+                    ->whereIn('estado', ['pendiente', 'contactado'])
+                    ->count();
+            }
+
+            $cupoMaximo = (int) $grupo->cupo_default;
+            $cuposDisponibles = max(0, $cupoMaximo - $inscriptosFijos - $leadsPendientes);
+
+            return [
+                'id' => (string) $grupo->id,
+                'nombre' => $grupo->nombre,
+                'descripcion' => $grupo->descripcion,
+                'modalidad' => $grupo->modalidad,
+                'hora_inicio' => $grupo->hora_inicio,
+                'hora_fin' => $grupo->hora_fin,
+                'dias_semana' => $grupo->dias_semana,
+                'cupo_default' => $cupoMaximo,
+                'cupo_maximo' => $cupoMaximo,
+                'inscriptos_fijos' => $inscriptosFijos,
+                'leads_pendientes' => $leadsPendientes,
+                'cupos_disponibles' => $cuposDisponibles,
+                'completo' => $cuposDisponibles === 0,
+            ];
+        });
 
         return response()->json([
             'tenant' => [
@@ -95,14 +143,95 @@ class PublicTenantController extends Controller
             'apellido' => ['nullable', 'string', 'max:100'],
             'email' => ['required', 'email', 'max:190'],
             'telefono' => ['required', 'string', 'max:40'],
+            'grupo_id' => ['nullable', 'string'],
+            'clase_id' => ['nullable', 'string'],
             'objetivo' => ['nullable', 'string', 'max:255'],
             'plan_interes' => ['nullable', 'string', 'max:100'],
+            'plan_interes_id' => ['nullable', 'numeric'],
             'mensaje' => ['nullable', 'string', 'max:500'],
         ]);
 
-        $normalizedEmail = strtolower(trim($validated['email']));
+        $grupoId = $validated['grupo_id'] ?? $validated['clase_id'] ?? null;
+        if ($grupoId === 'coordinar' || $grupoId === 'ninguno' || $grupoId === '') {
+            $grupoId = null;
+        }
 
-        // Verificar si ya existe este email en este Box
+        $normalizedEmail = strtolower(trim($validated['email']));
+        $hasLeadsTable = \Illuminate\Support\Facades\Schema::hasTable('leads');
+
+        if ($hasLeadsTable) {
+            $estado = 'pendiente';
+            $grupo = null;
+
+            if ($grupoId) {
+                $grupo = Grupo::withoutGlobalScopes()
+                    ->where('tenant_id', $tenant->id)
+                    ->where('id', $grupoId)
+                    ->first();
+
+                if ($grupo) {
+                    $inscriptosFijos = 0;
+                    if (\Illuminate\Support\Facades\Schema::hasTable('inscripciones_turno')) {
+                        $inscriptosFijos = \App\Models\InscripcionTurno::withoutGlobalScopes()
+                            ->where('tenant_id', $tenant->id)
+                            ->whereHas('turno', fn ($q) => $q->where('grupo_id', $grupo->id))
+                            ->where('estado', 'activa')
+                            ->whereNull('fecha_baja')
+                            ->distinct('alumno_id')
+                            ->count('alumno_id');
+                    }
+                    $leadsPendientes = \App\Models\Lead::withoutGlobalScopes()
+                        ->where('tenant_id', $tenant->id)
+                        ->where('grupo_id', $grupo->id)
+                        ->whereIn('estado', ['pendiente', 'contactado'])
+                        ->count();
+
+                    $disponibles = max(0, (int) $grupo->cupo_default - $inscriptosFijos - $leadsPendientes);
+                    if ($disponibles <= 0) {
+                        $estado = 'espera';
+                    }
+                }
+            }
+
+            // Buscar si ya existe un lead para este email
+            $lead = \App\Models\Lead::withoutGlobalScopes()
+                ->where('tenant_id', $tenant->id)
+                ->where('email', $normalizedEmail)
+                ->whereIn('estado', ['pendiente', 'contactado', 'espera'])
+                ->first();
+
+            $leadData = [
+                'tenant_id' => $tenant->id,
+                'grupo_id' => $grupo ? $grupo->id : null,
+                'plan_interes_id' => ! empty($validated['plan_interes_id']) ? $validated['plan_interes_id'] : null,
+                'nombre' => trim($validated['nombre']),
+                'apellido' => ! empty($validated['apellido']) ? trim($validated['apellido']) : null,
+                'email' => $normalizedEmail,
+                'telefono' => trim($validated['telefono']),
+                'mensaje' => $validated['mensaje'] ?? ($validated['objetivo'] ?? null),
+                'estado' => $estado,
+                'fecha_registro' => now()->toDateString(),
+            ];
+
+            if ($lead) {
+                $lead->update($leadData);
+            } else {
+                $lead = \App\Models\Lead::create($leadData);
+            }
+
+            $message = $estado === 'espera'
+                ? '¡Recibimos tus datos! Este horario ya se encuentra completo, pero te agregamos a la Lista de Espera prioritaria y te avisaremos ante cualquier vacante.'
+                : '¡Inscripción recibida con éxito! Te reservamos tu lugar en el turno y te contactaremos por WhatsApp para coordinar.';
+
+            return response()->json([
+                'message' => $message,
+                'lead_id' => $lead->id,
+                'estado' => $estado,
+                'es_lista_espera' => $estado === 'espera',
+            ], 201);
+        }
+
+        // Fallback histórico en caso de que la tabla leads todavía no esté migrada en la BD
         $existingUser = Usuario::withoutGlobalScopes()
             ->where('tenant_id', $tenant->id)
             ->where('email', $normalizedEmail)
@@ -117,8 +246,11 @@ class PublicTenantController extends Controller
         }
 
         // Crear como Socio en estado 'prospecto'
-        $alumno = DB::transaction(function () use ($tenant, $validated, $normalizedEmail) {
+        $alumno = DB::transaction(function () use ($tenant, $validated, $normalizedEmail, $grupoId) {
             $notaProspecto = 'Registro desde Landing Web.';
+            if ($grupoId) {
+                $notaProspecto .= ' Turno fijo ID: ' . $grupoId . '.';
+            }
             if (! empty($validated['objetivo'])) {
                 $notaProspecto .= ' Objetivo: ' . $validated['objetivo'] . '.';
             }
