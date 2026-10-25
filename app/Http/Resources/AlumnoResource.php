@@ -9,76 +9,99 @@ use Illuminate\Support\Facades\Schema;
 
 class AlumnoResource extends JsonResource
 {
+    private static ?bool $hasMembresias = null;
+    private static ?bool $hasAsistencias = null;
+    private static ?bool $hasInscripciones = null;
+
     public function toArray(Request $request): array
     {
+        if (self::$hasMembresias === null) {
+            self::$hasMembresias = Schema::hasTable('membresias');
+            self::$hasAsistencias = Schema::hasTable('asistencias');
+            self::$hasInscripciones = Schema::hasTable('inscripciones_turno');
+        }
+
         $usuario = $this->usuario;
         $nombreCompleto = $usuario ? $usuario->nombre_completo : '';
 
         $membresiaActiva = $this->relationLoaded('membresiaActiva')
             ? $this->membresiaActiva
-            : (Schema::hasTable('membresias') ? $this->membresiaActiva()->with('tipoMembresia')->first() : null);
+            : (self::$hasMembresias ? $this->membresiaActiva()->with('tipoMembresia')->first() : null);
         $tipoMembresia = $membresiaActiva?->tipoMembresia;
 
         $membresiaData = null;
-        if ($membresiaActiva) {
-            $esCreditos = $membresiaActiva->esPorCreditos();
-            $modalidad = $esCreditos ? 'creditos' : 'tiempo';
-            $creditosTotales = $esCreditos
-                ? (int) (($membresiaActiva->creditos_otorgados !== null && $membresiaActiva->creditos_otorgados > 0)
-                    ? $membresiaActiva->creditos_otorgados
-                    : ($tipoMembresia?->creditos ?? 0))
-                : null;
-            $creditosRestantes = $esCreditos
-                ? (int) ($membresiaActiva->creditos_restantes ?? $creditosTotales ?? 0)
-                : null;
+        try {
+            if ($membresiaActiva) {
+                $esCreditos = $membresiaActiva->esPorCreditos();
+                $modalidad = $esCreditos ? 'creditos' : 'tiempo';
+                $creditosTotales = $esCreditos
+                    ? (int) (($membresiaActiva->creditos_otorgados !== null && $membresiaActiva->creditos_otorgados > 0)
+                        ? $membresiaActiva->creditos_otorgados
+                        : ($tipoMembresia?->creditos ?? 0))
+                    : null;
+                $creditosRestantes = $esCreditos
+                    ? (int) ($membresiaActiva->creditos_restantes ?? $creditosTotales ?? 0)
+                    : null;
 
-            $membresiaData = [
-                'id' => (string) $membresiaActiva->id,
-                'plan' => $tipoMembresia?->nombre ?? 'Plan Activo',
-                'tipo' => $modalidad,
-                'modalidad' => $esCreditos ? 'Por Créditos' : 'Ilimitado (Tiempo)',
-                'creditos' => $creditosRestantes,
-                'creditos_restantes' => $creditosRestantes,
-                'creditos_totales' => $creditosTotales,
-                'vencimiento' => $membresiaActiva->fecha_fin?->format('Y-m-d'),
-                'fecha_inicio' => $membresiaActiva->fecha_inicio?->format('Y-m-d'),
-                'estado' => $membresiaActiva->estado_calculado,
-            ];
+                $membresiaData = [
+                    'id' => (string) $membresiaActiva->id,
+                    'plan' => $tipoMembresia?->nombre ?? 'Plan Activo',
+                    'tipo' => $modalidad,
+                    'modalidad' => $esCreditos ? 'Por Créditos' : 'Ilimitado (Tiempo)',
+                    'creditos' => $creditosRestantes,
+                    'creditos_restantes' => $creditosRestantes,
+                    'creditos_totales' => $creditosTotales,
+                    'vencimiento' => $membresiaActiva->fecha_fin?->format('Y-m-d'),
+                    'fecha_inicio' => $membresiaActiva->fecha_inicio?->format('Y-m-d'),
+                    'estado' => $membresiaActiva->estado_calculado,
+                ];
+            }
+        } catch (\Throwable) {
+            $membresiaData = null;
         }
 
         // Racha / asistencias del mes
         $rachaActual = 0;
-        if (Schema::hasTable('asistencias')) {
-            $rachaActual = Asistencia::query()
-                ->where('alumno_id', $this->id)
-                ->whereMonth('fecha', now()->month)
-                ->whereYear('fecha', now()->year)
-                ->distinct('fecha')
-                ->count('fecha');
+        try {
+            if (self::$hasAsistencias) {
+                $rachaActual = Asistencia::query()
+                    ->where('alumno_id', $this->id)
+                    ->whereMonth('fecha', now()->month)
+                    ->whereYear('fecha', now()->year)
+                    ->distinct('fecha')
+                    ->count('fecha');
+            }
+        } catch (\Throwable) {
+            $rachaActual = 0;
         }
 
         // Turnos fijos activos del socio
         $tieneTurnoFijo = false;
         $clasesFijas = [];
-        if (Schema::hasTable('inscripciones_turno')) {
-            $inscripciones = \App\Models\InscripcionTurno::query()
-                ->where('alumno_id', $this->id)
-                ->where('estado', 'activa')
-                ->with('turno.grupo')
-                ->get();
+        try {
+            if (self::$hasInscripciones) {
+                $inscripciones = \App\Models\InscripcionTurno::query()
+                    ->where('alumno_id', $this->id)
+                    ->where('estado', 'activa')
+                    ->with('turno.grupo')
+                    ->get();
 
-            $tieneTurnoFijo = $inscripciones->isNotEmpty();
-            $clasesFijas = $inscripciones
-                ->map(fn ($i) => $i->turno?->grupo)
-                ->filter()
-                ->unique('id')
-                ->map(fn ($g) => [
-                    'id' => (string) $g->id,
-                    'nombre' => $g->nombre,
-                    'hora_inicio' => substr((string) $g->hora_inicio, 0, 5),
-                ])
-                ->values()
-                ->all();
+                $tieneTurnoFijo = $inscripciones->isNotEmpty();
+                $clasesFijas = $inscripciones
+                    ->map(fn ($i) => $i->turno?->grupo)
+                    ->filter()
+                    ->unique('id')
+                    ->map(fn ($g) => [
+                        'id' => (string) $g->id,
+                        'nombre' => $g->nombre,
+                        'hora_inicio' => substr((string) $g->hora_inicio, 0, 5),
+                    ])
+                    ->values()
+                    ->all();
+            }
+        } catch (\Throwable) {
+            $tieneTurnoFijo = false;
+            $clasesFijas = [];
         }
 
         return [

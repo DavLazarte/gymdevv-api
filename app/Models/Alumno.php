@@ -33,13 +33,21 @@ class Alumno extends Model
         return [
             'fecha_nacimiento' => 'date:Y-m-d',
             'fecha_alta' => 'date:Y-m-d',
-            'estado' => EstadoAlumno::class,
         ];
+    }
+
+    public function getEstadoAttribute($value): string
+    {
+        if ($value instanceof EstadoAlumno) {
+            return $value->value;
+        }
+
+        return (string) ($value ?: 'activo');
     }
 
     public function getEstadoValueAttribute(): string
     {
-        return $this->estado instanceof EstadoAlumno ? $this->estado->value : (string) $this->estado;
+        return $this->estado;
     }
 
     public function usuario(): BelongsTo

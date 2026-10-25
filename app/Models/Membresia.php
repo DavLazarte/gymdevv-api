@@ -80,48 +80,62 @@ class Membresia extends Model
             return 0;
         }
 
-        $fechaInicio = $this->fecha_inicio?->format('Y-m-d');
-        $fechaFin = $this->fecha_fin?->format('Y-m-d');
-        $createdAt = $this->created_at ? $this->created_at->copy()->subMinute() : null;
+        $fechaInicio = $this->fecha_inicio instanceof \Carbon\CarbonInterface ? $this->fecha_inicio->format('Y-m-d') : (string) ($this->fecha_inicio ?: '');
+        $fechaFin = $this->fecha_fin instanceof \Carbon\CarbonInterface ? $this->fecha_fin->format('Y-m-d') : (string) ($this->fecha_fin ?: '');
+        $createdAt = $this->created_at instanceof \Carbon\CarbonInterface ? $this->created_at->copy()->subMinute() : null;
 
         // 1. Contar reservas activas o asistidas dentro del período de esta membresía
         $reservasUsadas = collect();
-        if (\Illuminate\Support\Facades\Schema::hasTable('reservas')) {
-            $qRes = Reserva::query()
-                ->where('alumno_id', $this->alumno_id)
-                ->whereIn('estado', ['reservada', 'asistio']);
+        try {
+            if (\Illuminate\Support\Facades\Schema::hasTable('reservas')) {
+                $qRes = Reserva::query()
+                    ->where('alumno_id', $this->alumno_id)
+                    ->whereIn('estado', ['reservada', 'asistio']);
 
-            if ($fechaInicio) {
-                $qRes->whereDate('fecha', '>=', $fechaInicio);
-            }
-            if ($fechaFin) {
-                $qRes->whereDate('fecha', '<=', $fechaFin);
-            }
-            if ($createdAt) {
-                $qRes->where('created_at', '>=', $createdAt);
-            }
+                if ($fechaInicio) {
+                    $qRes->whereDate('fecha', '>=', $fechaInicio);
+                }
+                if ($fechaFin) {
+                    $qRes->whereDate('fecha', '<=', $fechaFin);
+                }
+                if ($createdAt) {
+                    $qRes->where('created_at', '>=', $createdAt);
+                }
 
-            $reservasUsadas = $qRes->get()->map(fn (Reserva $r) => ($r->fecha?->format('Y-m-d') ?? '') . ':' . ($r->grupo_id ?? '0'));
+                $reservasUsadas = $qRes->get()->map(function (Reserva $r) {
+                    $f = $r->fecha instanceof \Carbon\CarbonInterface ? $r->fecha->format('Y-m-d') : (string) ($r->fecha ?: '');
+                    return $f . ':' . ($r->grupo_id ?? '0');
+                });
+            }
+        } catch (\Throwable) {
+            $reservasUsadas = collect();
         }
 
-        // 2. Contar asistencias registradas dentro del período de esta membresía (sin duplicar si ya tenía reserva ese día en ese grupo)
+        // 2. Contar asistencias registradas dentro del período de esta membresía
         $asistenciasUsadas = collect();
-        if (\Illuminate\Support\Facades\Schema::hasTable('asistencias')) {
-            $qAsis = Asistencia::query()
-                ->where('alumno_id', $this->alumno_id)
-                ->where('presente', true);
+        try {
+            if (\Illuminate\Support\Facades\Schema::hasTable('asistencias')) {
+                $qAsis = Asistencia::query()
+                    ->where('alumno_id', $this->alumno_id)
+                    ->where('presente', true);
 
-            if ($fechaInicio) {
-                $qAsis->whereDate('fecha', '>=', $fechaInicio);
-            }
-            if ($fechaFin) {
-                $qAsis->whereDate('fecha', '<=', $fechaFin);
-            }
-            if ($createdAt) {
-                $qAsis->where('created_at', '>=', $createdAt);
-            }
+                if ($fechaInicio) {
+                    $qAsis->whereDate('fecha', '>=', $fechaInicio);
+                }
+                if ($fechaFin) {
+                    $qAsis->whereDate('fecha', '<=', $fechaFin);
+                }
+                if ($createdAt) {
+                    $qAsis->where('created_at', '>=', $createdAt);
+                }
 
-            $asistenciasUsadas = $qAsis->get()->map(fn (Asistencia $a) => ($a->fecha?->format('Y-m-d') ?? '') . ':' . ($a->grupo_id ?? '0'));
+                $asistenciasUsadas = $qAsis->get()->map(function (Asistencia $a) {
+                    $f = $a->fecha instanceof \Carbon\CarbonInterface ? $a->fecha->format('Y-m-d') : (string) ($a->fecha ?: '');
+                    return $f . ':' . ($a->grupo_id ?? '0');
+                });
+            }
+        } catch (\Throwable) {
+            $asistenciasUsadas = collect();
         }
 
         $totalUsados = $reservasUsadas->merge($asistenciasUsadas)->unique()->count();
@@ -132,13 +146,20 @@ class Membresia extends Model
     public function getEstadoCalculadoAttribute(): string
     {
         $computedStatus = $this->estado ?: 'activa';
-        if ($computedStatus === 'activa' && $this->fecha_fin) {
-            $diasRestantes = now()->startOfDay()->diffInDays($this->fecha_fin->startOfDay(), false);
-            if ($diasRestantes < 0) {
-                $computedStatus = 'vencida';
-            } elseif ($diasRestantes <= 7) {
-                $computedStatus = 'por_vencer';
+        try {
+            if ($computedStatus === 'activa' && $this->fecha_fin) {
+                $fechaFin = $this->fecha_fin instanceof \Carbon\CarbonInterface
+                    ? $this->fecha_fin
+                    : \Carbon\Carbon::parse($this->fecha_fin);
+                $diasRestantes = now()->startOfDay()->diffInDays($fechaFin->startOfDay(), false);
+                if ($diasRestantes < 0) {
+                    $computedStatus = 'vencida';
+                } elseif ($diasRestantes <= 7) {
+                    $computedStatus = 'por_vencer';
+                }
             }
+        } catch (\Throwable) {
+            $computedStatus = $this->estado ?: 'activa';
         }
 
         return $computedStatus;
