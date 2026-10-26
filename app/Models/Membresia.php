@@ -138,9 +138,70 @@ class Membresia extends Model
             $asistenciasUsadas = collect();
         }
 
-        $totalUsados = $reservasUsadas->merge($asistenciasUsadas)->unique()->count();
+        $totalUsados = $reservasUsadas->merge($asistenciasUsadas);
 
-        return max(0, $creditosTotales - $totalUsados);
+        // 3. Contar turnos fijos pasados o del día de hoy donde el alumno NO avisó que faltaba (baja_fijo)
+        try {
+            if (\Illuminate\Support\Facades\Schema::hasTable('inscripciones_turno')) {
+                $inscripciones = InscripcionTurno::query()
+                    ->where('alumno_id', $this->alumno_id)
+                    ->where('estado', 'activa')
+                    ->with('turno')
+                    ->get();
+
+                if ($inscripciones->isNotEmpty()) {
+                    $bajasFijos = collect();
+                    if (\Illuminate\Support\Facades\Schema::hasTable('reservas')) {
+                        $bajasFijos = Reserva::query()
+                            ->where('alumno_id', $this->alumno_id)
+                            ->where('estado', 'baja_fijo')
+                            ->get()
+                            ->map(fn (Reserva $r) => ($r->fecha?->format('Y-m-d') ?? '') . ':' . ($r->turno_id ?? '0'));
+                    }
+
+                    $start = $this->fecha_inicio ? \Carbon\Carbon::parse($this->fecha_inicio)->startOfDay() : now()->subMonth();
+                    $limitDate = now()->endOfDay();
+                    if ($this->fecha_fin) {
+                        $fFin = \Carbon\Carbon::parse($this->fecha_fin)->endOfDay();
+                        if ($fFin->lt($limitDate)) {
+                            $limitDate = $fFin;
+                        }
+                    }
+
+                    foreach ($inscripciones as $inscripcion) {
+                        $turno = $inscripcion->turno;
+                        if (! $turno || $turno->dia_semana === null) {
+                            continue;
+                        }
+
+                        $fechaAltaTurno = $inscripcion->fecha_alta ? \Carbon\Carbon::parse($inscripcion->fecha_alta)->startOfDay() : $start;
+                        $fechaDesde = $start->gt($fechaAltaTurno) ? $start->copy() : $fechaAltaTurno->copy();
+
+                        $current = $fechaDesde->copy();
+                        while ($current->dayOfWeek !== (int) $turno->dia_semana && $current->lte($limitDate)) {
+                            $current->addDay();
+                        }
+
+                        while ($current->lte($limitDate)) {
+                            $fechaKey = $current->format('Y-m-d');
+                            $bajaKey = $fechaKey . ':' . $turno->id;
+
+                            if (! $bajasFijos->contains($bajaKey)) {
+                                $totalUsados->push($fechaKey . ':' . ($turno->grupo_id ?? '0'));
+                            }
+
+                            $current->addWeek();
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable) {
+            // Si hay algún problema calculando turnos fijos, no bloquear la membresía
+        }
+
+        $totalConsumido = $totalUsados->unique()->count();
+
+        return max(0, $creditosTotales - $totalConsumido);
     }
 
     public function getEstadoCalculadoAttribute(): string

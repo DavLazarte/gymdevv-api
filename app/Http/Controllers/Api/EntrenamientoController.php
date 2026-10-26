@@ -72,7 +72,9 @@ class EntrenamientoController extends Controller
                 ->all();
 
             $planesQuery->where(function ($q) use ($user, $misGruposIds) {
-                $q->where('coach_id', $user->id);
+                $q->where('tipo', 'general')
+                    ->orWhere('tipo', 'clase')
+                    ->orWhere('coach_id', $user->id);
                 if (! empty($misGruposIds)) {
                     $q->orWhereIn('grupo_id', $misGruposIds);
                 }
@@ -129,7 +131,9 @@ class EntrenamientoController extends Controller
                 ->all();
 
             $planesQuery->where(function ($q) use ($user, $misGruposIds) {
-                $q->where('coach_id', $user->id);
+                $q->where('tipo', 'general')
+                    ->orWhere('tipo', 'clase')
+                    ->orWhere('coach_id', $user->id);
                 if (! empty($misGruposIds)) {
                     $q->orWhereIn('grupo_id', $misGruposIds);
                 }
@@ -694,6 +698,33 @@ class EntrenamientoController extends Controller
             ?? $request->user()?->alumno?->id;
 
         if (! $alumnoId) {
+            $user = $request->user();
+            if ($user && ($user->isCoach() || $user->isAdmin())) {
+                $planes = PlanEntrenamiento::query()
+                    ->where('estado', 'activo')
+                    ->whereIn('tipo', ['general', 'clase'])
+                    ->with(['coach', 'grupo'])
+                    ->orderBy('id')
+                    ->get();
+                $planesIds = $planes->pluck('id')->all();
+                $semanas = Semana::query()
+                    ->whereIn('plan_id', $planesIds)
+                    ->whereIn('estado', ['en-curso', 'planificacion', 'finalizado'])
+                    ->with(['dias.links', 'dias.comentarios.autor', 'dias.comentarios.alumno.usuario'])
+                    ->orderByDesc('numero')
+                    ->orderByDesc('id')
+                    ->get();
+
+                return response()->json([
+                    'alumno' => null,
+                    'planes' => $planes->map(fn ($p) => $this->formatPlan($p)),
+                    'semanas' => $semanas->map(fn ($s) => $this->formatSemana($s)),
+                    'rms' => [],
+                    'progreso_dias' => [],
+                    'comentarios' => [],
+                ]);
+            }
+
             return response()->json([
                 'planes' => [],
                 'semanas' => [],

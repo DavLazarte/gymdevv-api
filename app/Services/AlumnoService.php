@@ -53,7 +53,7 @@ class AlumnoService
     {
         $perPage = (int) ($filters['per_page'] ?? 50);
         $query = Usuario::query()
-            ->where('rol', RolUsuario::Coach->value)
+            ->whereIn('rol', [RolUsuario::Coach->value, RolUsuario::Admin->value])
             ->orderBy('nombre');
 
         if (! empty($filters['search'])) {
