@@ -261,8 +261,13 @@ class ClaseGrupoController extends Controller
                     ->with('alumno.usuario')
                     ->get();
 
-                $fijosAlumnoIds = $inscripcionesDelTurno->pluck('alumno_id')->filter()->all();
-                $fijosCount = count($fijosAlumnoIds);
+                $fijosAlumnoIds = $inscripcionesDelTurno
+                    ->pluck('alumno_id')
+                    ->filter()
+                    ->map(fn ($id) => (int) $id)
+                    ->unique()
+                    ->values()
+                    ->all();
 
                 $reservasDelDia = Reserva::query()
                     ->where(function ($q) use ($turno, $grupo) {
@@ -277,17 +282,23 @@ class ClaseGrupoController extends Controller
                     ->where('estado', 'baja_fijo')
                     ->pluck('alumno_id')
                     ->filter()
+                    ->map(fn ($id) => (int) $id)
+                    ->unique()
+                    ->values()
                     ->all();
 
-                $bajasHoyCount = count(array_intersect($fijosAlumnoIds, $bajasHoyIds));
+                $fijosActivosHoyIds = array_diff($fijosAlumnoIds, $bajasHoyIds);
 
-                // Contar reservas puntuales de alumnos que NO son fijos de este turno (para no duplicar cupo cuando un fijo confirma asistencia)
-                $reservasExtraCount = $reservasDelDia
+                // Alumnos con reserva puntual o asistencia hoy (unificando por alumno_id para jamás duplicar cupo)
+                $reservasActivasIds = $reservasDelDia
                     ->whereIn('estado', ['reservada', 'asistio'])
-                    ->filter(fn (Reserva $r) => ! in_array($r->alumno_id, $fijosAlumnoIds, true))
-                    ->count();
+                    ->pluck('alumno_id')
+                    ->filter()
+                    ->map(fn ($id) => (int) $id)
+                    ->all();
 
-                $ocupados = max(0, $fijosCount - $bajasHoyCount + $reservasExtraCount);
+                $ocupadosIds = array_unique(array_merge($fijosActivosHoyIds, $reservasActivasIds));
+                $ocupados = count($ocupadosIds);
 
                 $miReserva = $alumnoId
                     ? $reservasDelDia
@@ -297,7 +308,7 @@ class ClaseGrupoController extends Controller
                     : null;
 
                 $bajaFijoHoyMia = ($esFijoMio && $alumnoId)
-                    ? in_array($alumnoId, $bajasHoyIds, true)
+                    ? in_array((int) $alumnoId, $bajasHoyIds, true)
                     : false;
 
                 $horaInicioStr = substr((string) $turno->hora_inicio, 0, 5);
@@ -319,7 +330,7 @@ class ClaseGrupoController extends Controller
 
                 foreach ($inscripcionesDelTurno as $ins) {
                     $al = $ins->alumno;
-                    if (! $al || in_array($al->id, $bajasHoyIds, true)) {
+                    if (! $al || in_array((int) $al->id, $bajasHoyIds, true)) {
                         continue;
                     }
                     $resSocio = $reservasDelDia->firstWhere('alumno_id', $al->id);
@@ -332,12 +343,12 @@ class ClaseGrupoController extends Controller
                         'tipo_persona' => 'cliente',
                         'estado_asistencia' => $resSocio?->estado ?? 'anotado_fijo',
                     ];
-                    $alumnosAgregadosIds[] = $al->id;
+                    $alumnosAgregadosIds[] = (int) $al->id;
                 }
 
                 foreach ($reservasDelDia->whereIn('estado', ['reservada', 'asistio']) as $resExtra) {
                     $al = $resExtra->alumno;
-                    if (! $al || in_array($al->id, $alumnosAgregadosIds, true)) {
+                    if (! $al || in_array((int) $al->id, $alumnosAgregadosIds, true)) {
                         continue;
                     }
                     $alumnosEnClase[] = [
@@ -349,7 +360,7 @@ class ClaseGrupoController extends Controller
                         'tipo_persona' => 'cliente',
                         'estado_asistencia' => $resExtra->estado,
                     ];
-                    $alumnosAgregadosIds[] = $al->id;
+                    $alumnosAgregadosIds[] = (int) $al->id;
                 }
 
                 $instancias[] = [
@@ -622,28 +633,65 @@ class ClaseGrupoController extends Controller
 
         $alumnosFijos = array_values($alumnosMap);
         $inscritosFijosCount = count($alumnosFijos);
+        $fijosIds = array_map('intval', array_keys($alumnosMap));
 
         $turnoIds = $grupo->turnos->pluck('id');
-        $bajasFijosHoy = $turnoIds->isNotEmpty()
-            ? Reserva::query()
-                ->whereIn('turno_id', $turnoIds)
-                ->whereDate('fecha', $hoy)
-                ->where('estado', 'baja_fijo')
-                ->count()
-            : 0;
 
-        $reservasYAsistenciasHoy = Asistencia::query()
-            ->where('grupo_id', $grupo->id)
+        // Bajas de turno fijo para hoy (alumnos fijos que avisaron que no asisten hoy)
+        $bajasFijosHoyIds = Reserva::query()
+            ->where(function ($q) use ($grupo, $turnoIds) {
+                $q->where('grupo_id', $grupo->id);
+                if ($turnoIds->isNotEmpty()) {
+                    $q->orWhereIn('turno_id', $turnoIds);
+                }
+            })
             ->whereDate('fecha', $hoy)
-            ->count()
-            + Reserva::query()
-                ->where('grupo_id', $grupo->id)
-                ->whereDate('fecha', $hoy)
-                ->where('estado', 'reservada')
-                ->count();
+            ->where('estado', 'baja_fijo')
+            ->pluck('alumno_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        $fijosActivosHoyIds = array_diff($fijosIds, $bajasFijosHoyIds);
+
+        // Alumnos con reserva activa ('reservada' o 'asistio') hoy
+        $reservasHoyIds = Reserva::query()
+            ->where(function ($q) use ($grupo, $turnoIds) {
+                $q->where('grupo_id', $grupo->id);
+                if ($turnoIds->isNotEmpty()) {
+                    $q->orWhereIn('turno_id', $turnoIds);
+                }
+            })
+            ->whereDate('fecha', $hoy)
+            ->whereIn('estado', ['reservada', 'asistio'])
+            ->pluck('alumno_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        // Alumnos con asistencia registrada hoy
+        $asistenciasHoyIds = Asistencia::query()
+            ->where(function ($q) use ($grupo, $turnoIds) {
+                $q->where('grupo_id', $grupo->id);
+                if ($turnoIds->isNotEmpty()) {
+                    $q->orWhereIn('turno_id', $turnoIds);
+                }
+            })
+            ->whereDate('fecha', $hoy)
+            ->pluck('alumno_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        // Unificar por alumno_id para jamás duplicar cupo entre Fijos, Reservas y Asistencias
+        $ocupadosHoyIds = array_unique(array_merge(
+            $fijosActivosHoyIds,
+            $reservasHoyIds,
+            $asistenciasHoyIds
+        ));
 
         $modalidad = $grupo->modalidad ?? ($inscritosFijosCount > 0 ? 'fijo' : 'libre');
-        $inscritosHoy = max(0, $inscritosFijosCount - $bajasFijosHoy) + $reservasYAsistenciasHoy;
+        $inscritosHoy = count($ocupadosHoyIds);
 
         return [
             'id' => (string) $grupo->id,

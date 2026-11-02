@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Alumno;
+use App\Models\Asistencia;
+use App\Models\Grupo;
 use App\Models\InscripcionTurno;
 use App\Models\Membresia;
 use App\Models\MovimientoCredito;
@@ -45,7 +47,7 @@ class ReservaController extends Controller
 
         $coachGrupoIds = null;
         if ($request->user()?->isCoach()) {
-            $coachGrupoIds = \App\Models\Grupo::query()
+            $coachGrupoIds = Grupo::query()
                 ->where('coach_id', $request->user()->id)
                 ->pluck('id')
                 ->all();
@@ -222,6 +224,7 @@ class ReservaController extends Controller
         ]);
 
         $fechaCarbon = Carbon::parse($validated['fecha']);
+        $fechaStr = $fechaCarbon->toDateString();
         $turno = null;
         if (! empty($validated['turno_id'])) {
             $turno = Turno::query()->find($validated['turno_id']);
@@ -233,10 +236,11 @@ class ReservaController extends Controller
         }
 
         $grupoIdFinal = $validated['grupo_id'] ?? $turno?->grupo_id;
+        $grupo = $grupoIdFinal ? Grupo::query()->find($grupoIdFinal) : null;
 
         $existente = Reserva::withTrashed()
             ->where('alumno_id', $validated['alumno_id'])
-            ->whereDate('fecha', $fechaCarbon->toDateString())
+            ->whereDate('fecha', $fechaStr)
             ->where(function ($q) use ($turno, $grupoIdFinal) {
                 if ($turno) {
                     $q->where('turno_id', $turno->id);
@@ -248,7 +252,90 @@ class ReservaController extends Controller
 
         $yaEstabaReservada = $existente && ! $existente->trashed() && in_array($existente->estado, ['reservada', 'asistio'], true);
 
+        $esTurnoFijoSocio = $turno
+            ? InscripcionTurno::query()
+                ->where('turno_id', $turno->id)
+                ->where('alumno_id', $validated['alumno_id'])
+                ->where('estado', 'activa')
+                ->exists()
+            : false;
+
         if (! $esBajaTurnoFijo && ! $yaEstabaReservada) {
+            // Si el alumno NO tiene lugar fijo en este turno, verificar que no supere el cupo máximo de la clase
+            if (! $esTurnoFijoSocio && ($turno || $grupo)) {
+                $cupoMaximo = (int) ($turno?->cupo ?? $grupo?->cupo_default ?? 20);
+                $turnoIds = $turno
+                    ? collect([$turno->id])
+                    : ($grupo ? $grupo->turnos()->where('activo', true)->pluck('id') : collect());
+
+                $fijosIds = $turnoIds->isNotEmpty()
+                    ? InscripcionTurno::query()
+                        ->whereIn('turno_id', $turnoIds)
+                        ->where('estado', 'activa')
+                        ->pluck('alumno_id')
+                        ->filter()
+                        ->map(fn ($id) => (int) $id)
+                        ->all()
+                    : [];
+
+                $bajasHoyIds = Reserva::query()
+                    ->where(function ($q) use ($grupoIdFinal, $turnoIds) {
+                        if ($grupoIdFinal) {
+                            $q->where('grupo_id', $grupoIdFinal);
+                        }
+                        if ($turnoIds->isNotEmpty()) {
+                            $q->orWhereIn('turno_id', $turnoIds);
+                        }
+                    })
+                    ->whereDate('fecha', $fechaStr)
+                    ->where('estado', 'baja_fijo')
+                    ->pluck('alumno_id')
+                    ->filter()
+                    ->map(fn ($id) => (int) $id)
+                    ->all();
+
+                $fijosActivosHoyIds = array_diff($fijosIds, $bajasHoyIds);
+
+                $reservasHoyIds = Reserva::query()
+                    ->where(function ($q) use ($grupoIdFinal, $turnoIds) {
+                        if ($grupoIdFinal) {
+                            $q->where('grupo_id', $grupoIdFinal);
+                        }
+                        if ($turnoIds->isNotEmpty()) {
+                            $q->orWhereIn('turno_id', $turnoIds);
+                        }
+                    })
+                    ->whereDate('fecha', $fechaStr)
+                    ->whereIn('estado', ['reservada', 'asistio'])
+                    ->pluck('alumno_id')
+                    ->filter()
+                    ->map(fn ($id) => (int) $id)
+                    ->all();
+
+                $asistenciasHoyIds = Asistencia::query()
+                    ->where(function ($q) use ($grupoIdFinal, $turnoIds) {
+                        if ($grupoIdFinal) {
+                            $q->where('grupo_id', $grupoIdFinal);
+                        }
+                        if ($turnoIds->isNotEmpty()) {
+                            $q->orWhereIn('turno_id', $turnoIds);
+                        }
+                    })
+                    ->whereDate('fecha', $fechaStr)
+                    ->pluck('alumno_id')
+                    ->filter()
+                    ->map(fn ($id) => (int) $id)
+                    ->all();
+
+                $ocupadosIds = array_unique(array_merge($fijosActivosHoyIds, $reservasHoyIds, $asistenciasHoyIds));
+
+                if (! in_array((int) $validated['alumno_id'], $ocupadosIds, true) && count($ocupadosIds) >= $cupoMaximo) {
+                    return response()->json([
+                        'message' => "La clase ya alcanzó su cupo máximo ({$cupoMaximo} lugares) para esta fecha.",
+                    ], 422);
+                }
+            }
+
             $membresiaActiva = Membresia::query()
                 ->where('alumno_id', $validated['alumno_id'])
                 ->where('estado', 'activa')
@@ -262,14 +349,6 @@ class ReservaController extends Controller
                 ], 422);
             }
         }
-
-        $esTurnoFijoSocio = $turno
-            ? InscripcionTurno::query()
-                ->where('turno_id', $turno->id)
-                ->where('alumno_id', $validated['alumno_id'])
-                ->where('estado', 'activa')
-                ->exists()
-            : false;
 
         $reserva = DB::transaction(function () use ($validated, $turno, $grupoIdFinal, $esBajaTurnoFijo, $existente, $yaEstabaReservada) {
             $nuevoEstado = $esBajaTurnoFijo ? 'baja_fijo' : 'reservada';
